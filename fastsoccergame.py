@@ -170,7 +170,7 @@ tab_lineup, tab_add_merge, tab_game, tab_export, tab_faq = st.tabs(
         "Lineup Setup",
         "Add / Merge Players",
         "Fast Tap Game Mode",
-        "Export Summary File",
+        "Export / Merge Season",
         "FAQ / Formulas",
     ]
 )
@@ -481,4 +481,5 @@ with tab_faq:
   - Download a **TXT** summary for quick sharing or notes.
 - You can also **save or load a full season** using the Season Save/Load options.
 """
+
     )
