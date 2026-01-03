@@ -38,6 +38,10 @@ def ensure_session_state():
         st.session_state.last_play = None
 
 
+# ----------------------------------------
+# Player lookup
+# ----------------------------------------
+
 def get_player_by_name(name: str):
     for p in st.session_state.stats:
         if p["Player"] == name:
@@ -45,61 +49,76 @@ def get_player_by_name(name: str):
     return None
 
 
+# ----------------------------------------
+# Ensure all fields exist (includes GF + GA + T + I)
+# ----------------------------------------
+
 def ensure_player_fields(player: dict):
     defaults = {
-        "Goals": 0,
+        "Goals_For": 0,
         "Assists": 0,
         "Shots": 0,
         "Saves": 0,
-        "Goals_Allowed": 0,
+        "Goals_Against": 0,
+        "Tackles": 0,
+        "Interceptions": 0,
     }
     for k, v in defaults.items():
         if k not in player:
             player[k] = v
 
 
+# ----------------------------------------
+# Add / Merge logic (OVERWRITE MODE)
+# ----------------------------------------
+
 def merge_or_add_player(stats_list, entry):
     existing = get_player_by_name(entry["Player"])
+
     if existing is None:
         ensure_player_fields(entry)
         stats_list.append(entry)
         return "added"
-    else:
-        ensure_player_fields(existing)
-        ensure_player_fields(entry)
-        existing["Goals"] += entry["Goals"]
-        existing["Assists"] += entry["Assists"]
-        existing["Shots"] += entry["Shots"]
-        existing["Saves"] += entry["Saves"]
-        existing["Goals_Allowed"] += entry["Goals_Allowed"]
-        return "merged"
 
+    ensure_player_fields(existing)
+    ensure_player_fields(entry)
+
+    existing["Goals_For"] = entry["Goals_For"]
+    existing["Assists"] = entry["Assists"]
+    existing["Shots"] = entry["Shots"]
+    existing["Saves"] = entry["Saves"]
+    existing["Goals_Against"] = entry["Goals_Against"]
+    existing["Tackles"] = entry["Tackles"]
+    existing["Interceptions"] = entry["Interceptions"]
+
+    return "merged"
+
+
+# ----------------------------------------
+# Fast Tap logic (ADDITIVE MODE)
+# ----------------------------------------
 
 def record_fast_tap(player_name: str, field: str, delta: int):
-    """
-    Fast Tap logic:
-    - Every Goal is also a Shot on Target.
-    - Other fields only touch their own stat.
-    """
     player = get_player_by_name(player_name)
     if player is None:
         player = {
             "Player": player_name,
-            "Goals": 0,
+            "Goals_For": 0,
             "Assists": 0,
             "Shots": 0,
             "Saves": 0,
-            "Goals_Allowed": 0,
+            "Goals_Against": 0,
+            "Tackles": 0,
+            "Interceptions": 0,
         }
         st.session_state.stats.append(player)
 
     ensure_player_fields(player)
 
-    # Apply main stat change
     player[field] = max(0, player[field] + delta)
 
-    # If a goal is recorded, also increment Shots on Target
-    if field == "Goals" and delta > 0:
+    # GF tap also increments Shots
+    if field == "Goals_For" and delta > 0:
         player["Shots"] = max(0, player["Shots"] + delta)
 
     st.session_state.last_play = {
@@ -109,10 +128,14 @@ def record_fast_tap(player_name: str, field: str, delta: int):
     }
 
 
-def undo_last_play():
+# ----------------------------------------
+# Undo last Fast Tap (INLINE MESSAGE VERSION)
+# ----------------------------------------
+
+def undo_last_play(undo_msg):
     lp = st.session_state.last_play
     if not lp:
-        st.warning("No action to undo.")
+        undo_msg.warning("No action to undo.")
         return
 
     player = get_player_by_name(lp["player"])
@@ -122,16 +145,20 @@ def undo_last_play():
 
     ensure_player_fields(player)
 
-    # If last play was a goal, we also undo the associated shot
-    if lp["field"] == "Goals" and lp["delta"] > 0:
-        player["Goals"] = max(0, player["Goals"] - lp["delta"])
+    # Undo GF + Sh logic
+    if lp["field"] == "Goals_For" and lp["delta"] > 0:
+        player["Goals_For"] = max(0, player["Goals_For"] - lp["delta"])
         player["Shots"] = max(0, player["Shots"] - lp["delta"])
     else:
         player[lp["field"]] = max(0, player[lp["field"]] - lp["delta"])
 
     st.session_state.last_play = None
-    st.success("Last action undone.")
+    undo_msg.info("Last action undone.")
 
+
+# ----------------------------------------
+# Build stats dataframe (GF + GA + T + I)
+# ----------------------------------------
 
 def build_stats_dataframe():
     rows = []
@@ -139,14 +166,16 @@ def build_stats_dataframe():
         ensure_player_fields(p)
         rows.append({
             "Player": p["Player"],
-            "G": p["Goals"],
+            "GF": p["Goals_For"],
             "A": p["Assists"],
             "Sh": p["Shots"],
             "S": p["Saves"],
-            "C": p["Goals_Allowed"],
+            "GA": p["Goals_Against"],
+            "T": p["Tackles"],
+            "I": p["Interceptions"],
         })
     if not rows:
-        return pd.DataFrame(columns=["Player", "G", "A", "Sh", "S", "C"])
+        return pd.DataFrame(columns=["Player", "GF", "A", "Sh", "S", "GA", "T", "I"])
     return pd.DataFrame(rows)
 
 
@@ -201,8 +230,9 @@ with tab_lineup:
     st.write("Current lineup (alphabetical):")
     st.write(", ".join(sorted(st.session_state.lineup)) or "No players yet.")
 
+
 # ----------------------------------------
-# TAB 2 — Add / Merge Players
+# TAB 2 — Add / Merge Players (OVERWRITE MODE)
 # ----------------------------------------
 with tab_add_merge:
     st.header("➕ Add or Merge Player Stats")
@@ -215,7 +245,6 @@ with tab_add_merge:
 
     last_selected_dropdown = st.session_state.add_merge_selector
 
-    # Clear new-name field when switching to an existing player
     if last_selected_dropdown != "Reset selection (use new name field)":
         st.session_state.add_new_name_input = ""
 
@@ -240,7 +269,7 @@ with tab_add_merge:
             reset_needed = True
 
     if reset_needed:
-        reset_keys = ["soc_g", "soc_a", "soc_sh", "soc_s", "soc_c"]
+        reset_keys = ["soc_gf", "soc_a", "soc_sh", "soc_s", "soc_ga", "soc_t", "soc_i"]
         for k in reset_keys:
             if k in st.session_state:
                 st.session_state[k] = 0
@@ -255,11 +284,13 @@ with tab_add_merge:
 
     st.subheader("Player Stats")
 
-    g = st.number_input("Goals (G)", min_value=0, step=1, key="soc_g")
+    gf = st.number_input("Goals For (GF)", min_value=0, step=1, key="soc_gf")
     a = st.number_input("Assists (A)", min_value=0, step=1, key="soc_a")
     sh = st.number_input("Shots on Target (Sh)", min_value=0, step=1, key="soc_sh")
     s_saves = st.number_input("Saves (S)", min_value=0, step=1, key="soc_s")
-    c_allowed = st.number_input("Goals Allowed (C)", min_value=0, step=1, key="soc_c")
+    ga = st.number_input("Goals Against (GA)", min_value=0, step=1, key="soc_ga")
+    tackles = st.number_input("Tackles (T)", min_value=0, step=1, key="soc_t")
+    interceptions = st.number_input("Interceptions (I)", min_value=0, step=1, key="soc_i")
 
     if st.button("➕ Add / Merge Player Stats"):
         if selected_option == "Reset selection (use new name field)":
@@ -273,20 +304,21 @@ with tab_add_merge:
         else:
             is_new = get_player_by_name(name) is None
 
-            total_stats = g + a + sh + s_saves + c_allowed
+            total_stats = gf + a + sh + s_saves + ga + tackles + interceptions
             if is_new and total_stats == 0:
                 st.error("Please enter stats for a new player.")
-            elif g > sh:
-                st.error("Goals (G) cannot exceed Shots on Target (Sh).")
             else:
                 entry = {
                     "Player": name,
-                    "Goals": g,
+                    "Goals_For": gf,
                     "Assists": a,
                     "Shots": sh,
                     "Saves": s_saves,
-                    "Goals_Allowed": c_allowed,
+                    "Goals_Against": ga,
+                    "Tackles": tackles,
+                    "Interceptions": interceptions,
                 }
+
                 result = merge_or_add_player(st.session_state.stats, entry)
 
                 if name not in st.session_state.lineup:
@@ -303,8 +335,9 @@ with tab_add_merge:
         df = build_stats_dataframe()
         st.table(df)
 
+
 # ----------------------------------------
-# TAB 3 — Fast Tap Game Mode
+# TAB 3 — Fast Tap Game Mode (ADDITIVE MODE)
 # ----------------------------------------
 with tab_game:
     st.header("⚡ Fast Tap Game Mode")
@@ -321,37 +354,62 @@ with tab_game:
         if fasttap_player:
             st.write(f"Recording stats for: **{fasttap_player}**")
 
+            # Create undo message placeholder (prevents layout shift)
+            undo_msg = st.empty()
+
+            # Button grid
             col1, col2, col3 = st.columns(3)
             col4, col5, col6 = st.columns(3)
+            col7, col8, col9 = st.columns(3)
 
+            # Row 1
             with col1:
-                if st.button("⚽ Goal (G)"):
-                    record_fast_tap(fasttap_player, "Goals", 1)
+                if st.button("⚽ Goal"):
+                    record_fast_tap(fasttap_player, "Goals_For", 1)
+                    undo_msg.empty()
             with col2:
-                if st.button("🎯 Assist (A)"):
+                if st.button("🎯 Assist"):
                     record_fast_tap(fasttap_player, "Assists", 1)
+                    undo_msg.empty()
             with col3:
-                if st.button("🎯 Shot on Target (Sh)"):
+                if st.button("🎯 Shot on Target"):
                     record_fast_tap(fasttap_player, "Shots", 1)
+                    undo_msg.empty()
 
+            # Row 2
             with col4:
-                if st.button("🧤 Save (S)"):
+                if st.button("🧤 Save"):
                     record_fast_tap(fasttap_player, "Saves", 1)
+                    undo_msg.empty()
             with col5:
-                if st.button("❌ Goal Allowed (C)"):
-                    record_fast_tap(fasttap_player, "Goals_Allowed", 1)
+                if st.button("❌ Goal Against"):
+                    record_fast_tap(fasttap_player, "Goals_Against", 1)
+                    undo_msg.empty()
             with col6:
                 if st.button("↩️ Undo Last Action"):
-                    undo_last_play()
+                    undo_last_play(undo_msg)
 
+            # Row 3
+            with col7:
+                if st.button("🛑 Tackle"):
+                    record_fast_tap(fasttap_player, "Tackles", 1)
+                    undo_msg.empty()
+            with col8:
+                if st.button("🕵️ Interception"):
+                    record_fast_tap(fasttap_player, "Interceptions", 1)
+                    undo_msg.empty()
+
+            # Current stats display
             p = get_player_by_name(fasttap_player)
             if p:
                 ensure_player_fields(p)
                 st.subheader("Current Stats for Selected Player")
                 st.write(
-                    f"G: {p['Goals']} | A: {p['Assists']} | "
-                    f"Sh: {p['Shots']} | S: {p['Saves']} | C: {p['Goals_Allowed']}"
+                    f"GF: {p['Goals_For']} | A: {p['Assists']} | "
+                    f"Sh: {p['Shots']} | S: {p['Saves']} | GA: {p['Goals_Against']} | "
+                    f"T: {p['Tackles']} | I: {p['Interceptions']}"
                 )
+
 
 # ----------------------------------------
 # TAB 4 — Export Summary File + Season Save/Load
@@ -377,8 +435,10 @@ with tab_export:
         buffer.write("Soccer Stats Summary\n\n")
         for _, row in df.iterrows():
             buffer.write(
-                f"{row['Player']}: G={row['G']}, A={row['A']}, "
-                f"Sh={row['Sh']}, S={row['S']}, C={row['C']}\n"
+                f"{row['Player']}: "
+                f"GF={row['GF']}, A={row['A']}, Sh={row['Sh']}, "
+                f"S={row['S']}, GA={row['GA']}, "
+                f"T={row['T']}, I={row['I']}\n"
             )
         txt_data = buffer.getvalue().encode("utf-8")
 
@@ -427,7 +487,6 @@ with tab_export:
             else:
                 stats = loaded.get("stats", [])
 
-                # Restore lineup if present; otherwise rebuild from stats
                 lineup_from_file = loaded.get("lineup", [])
                 if not lineup_from_file:
                     lineup_from_file = sorted(
@@ -438,10 +497,11 @@ with tab_export:
                 st.session_state.lineup = lineup_from_file
                 st.session_state.last_play = loaded.get("last_play", None)
 
-                st.success("Season loaded — stats and lineup restored. Check Lineup tab to confirm players.")
+                st.success("Season loaded — stats and lineup restored.")
 
         except Exception as e:
             st.error(f"Error loading season file: {e}")
+
 
 # ----------------------------------------
 # TAB 5 — FAQ / Formulas
@@ -451,35 +511,66 @@ with tab_faq:
 
     st.markdown(
         """
-### What does each stat mean?
+## 📘 What does each stat mean?
 
-- **Goals (G):** Number of goals scored by the player.
-- **Assists (A):** Number of times the player assisted a goal.
-- **Shots on Target (Sh):** Shots that were on target (including goals).
-- **Saves (S):** Saves made by the player (typically goalkeeper).
-- **Goals Allowed (C):** Goals conceded while the player is in goal.
+- **⚽ Goals For (GF):** Number of goals scored by the player.  
+- **🎯 Assists (A):** Number of times the player assisted a goal.  
+- **🎯 Shots on Target (Sh):** Shots that were on target (including goals).  
+- **🧤 Saves (S):** Saves made by the player (typically goalkeeper).  
+- **❌ Goals Against (GA):** Goals conceded while the player is in goal.  
+- **🛑 Tackles (T):** A defensive challenge where the player wins the ball.  
+- **🕵️ Interceptions (I):** When a player anticipates and cuts off a pass.
 
-### How does Add / Merge work?
+---
 
-- If you enter stats for a **new player name**, a new record is created.
-- If you enter stats for an **existing player**, the stats are **added** on top of existing totals.
-- Switching the selected player or typing a different new name will reset the input fields to zero to prevent accidental carryover.
+## ➕ Add / Merge Players — Manual Entry (Overwrite Mode)
 
-### How does Fast Tap Game Mode work?
+This tab is designed for **manual stat entry**.
 
-- Choose a player from the lineup.
-- Tap the appropriate buttons:
-  - **Goal (G), Assist (A), Shot on Target (Sh)** for offensive actions.
-  - **Save (S), Goal Allowed (C)** for goalkeeper actions.
-- Each tap increments the corresponding stat by 1.
-- Use **Undo Last Action** to reverse the last tap.
+- 🆕 Entering stats for a **new player** creates a new record.  
+- ✏️ Entering stats for an **existing player** **overwrites** their totals with the values you typed.  
+- 🔄 Switching players or typing a new name resets the input fields to zero.  
+- ✋ **No automatic logic is applied here** — you can enter any values you want.
 
-### How does exporting work?
+This mode is ideal for corrections, bulk updates, or entering stats after a match.
 
-- The **Export Summary File** tab lets you:
-  - Download a **CSV** file for spreadsheets.
-  - Download a **TXT** summary for quick sharing or notes.
-- You can also **save or load a full season** using the Season Save/Load options.
+---
+
+## ⚡ Fast Tap Game Mode — Live Scoring (Additive Mode)
+
+This mode is built for **real‑time, event‑based scoring**.
+
+Tap buttons to record live events:
+
+- ⚽ Goal (adds **1 GF + 1 Sh**)  
+- 🎯 Assist  
+- 🎯 Shot on Target  
+- 🧤 Save  
+- ❌ Goal Against  
+- 🛑 Tackle  
+- 🕵️ Interception  
+- ↩️ Undo reverses the last tap.
+
+Fast Tap **adds** to existing totals because each tap represents a real match event.
+
+---
+
+## 🧠 Why the two modes behave differently
+
+- **Fast Tap** = live scoring with automatic soccer logic  
+- **Add / Merge** = manual control for editing or entering stats after the fact  
+
+This separation keeps live scoring fast and accurate while giving you full flexibility for manual updates.
+
+---
+
+## 📤 Exporting & Season Save/Load
+
+The Export tab lets you:
+
+- 📄 Download a **CSV** file  
+- 📝 Download a **TXT** summary  
+- 💾 Save a full season (stats + lineup)  
+- 📂 Load a saved season to restore everything  
 """
-
     )
